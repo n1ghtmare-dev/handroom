@@ -1,0 +1,38 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Handroom — audio render checks</title></head><body style="font:15px system-ui;background:#122017;color:#d8ede0;padding:30px"><h1>Musical scene rendering</h1><p>Offline rendering uses the production audio engine. No camera or microphone.</p><button id="run">Render all musical scenes</button><pre id="results" style="white-space:pre-wrap">Ready</pre><div id="samples"></div><script type="module">
+import {AudioEngine} from '/src/audio.js';
+import {SCENES,scenePattern,stepDuration,grooveVelocity} from '/src/music.js';
+import {encodeWav} from '/src/gestures.js';
+const log=s=>document.querySelector('#results').textContent+='\n'+s;
+async function render(scene,stress=false){
+ const barLength=60/scene.bpm*4,duration=barLength*4+4.5,sampleRate=44100;
+ const context=new OfflineAudioContext(2,Math.ceil(duration*sampleRate),sampleRate);
+ const engine=new AudioEngine(context);engine.setScene(scene);if(stress){engine.volume=1;for(const name of Object.keys(engine.mix))engine.setMix(name,1);}await engine.init();
+ const pattern=scenePattern(scene);let time=.1;
+ for(let absolute=0;absolute<64;absolute++){
+   const step=absolute%16,bar=Math.floor(absolute/16);engine.backing(step,bar,time,scene.bpm);
+   pattern.forEach((row,i)=>{if(row[step]||stress)engine.hit([0,1,2,4][i],'drums',time,stress?.85:grooveVelocity(i,step,bar),{tag:'backing'});});
+   if(step%2===0){
+     const lead=[0,2,4,3,1,4,2,0][step/2];engine.hit(lead,'synth',time+.015,.67);
+     if(stress)for(let i=0;i<8;i++)engine.hit(i,'synth',time+.015,.9);
+   }
+   time+=stepDuration(step,scene.bpm,scene.swing);
+ }
+ const result=await context.startRendering();let peak=0,energy=0,dc=0,clipped=0,finite=true;
+ const count=Math.floor(barLength*4*sampleRate);
+ for(let ch=0;ch<result.numberOfChannels;ch++){
+  const data=result.getChannelData(ch);
+  for(let i=0;i<data.length;i++){const v=data[i];if(!Number.isFinite(v))finite=false;peak=Math.max(peak,Math.abs(v));if(Math.abs(v)>=.999)clipped++;if(i<count){energy+=v*v;dc+=v;}}
+ }
+ const rms=Math.sqrt(energy/(count*2)),mean=dc/(count*2);
+ log(`${scene.name}${stress?' [stress]':''}: peak=${peak.toFixed(3)}, RMS=${rms.toFixed(3)}, DC=${mean.toFixed(5)}, clipped=${clipped}`);
+ if(!finite||clipped||peak>.98||rms<.008||Math.abs(mean)>.015)throw new Error('Invalid audio/headroom');
+ if(!stress){
+   const blob=new Blob([encodeWav([result.getChannelData(0),result.getChannelData(1)],sampleRate)],{type:'audio/wav'}),url=URL.createObjectURL(blob);
+   const block=document.createElement('div');block.style.marginTop='25px';
+   const h=document.createElement('h2');h.textContent=scene.name;block.append(h);
+   const audio=document.createElement('audio');audio.controls=true;audio.src=url;block.append(audio);
+   const link=document.createElement('a');link.href=url;link.download=`handroom-${scene.id}.wav`;link.textContent='Download '+scene.id;link.style.color='#b7e8cd';link.style.marginLeft='15px';block.append(link);document.querySelector('#samples').append(block);
+ }
+}
+document.querySelector('#run').onclick=async()=>{document.querySelector('#run').disabled=true;try{for(const scene of SCENES)await render(scene);await render(SCENES[0],true);log('ALL SCENES PASS');}catch(e){log('FAIL: '+e.message);console.error(e);}};
+</script></body></html>
