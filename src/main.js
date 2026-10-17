@@ -6,12 +6,16 @@ import { HandCamera } from './vision.js';
 import { GestureInterpreter, PADS, defaultPattern, encodeWav } from './gestures.js';
 import { recordings,saveSettings,loadSettings } from './storage.js';
 import {SCENES,VOICES,DEFAULT_MIX,getScene,scenePattern,chordAt,stepDuration,assistedTime,grooveVelocity} from './music.js';
+import {InstrumentInterpreter,pianoKeys,drumZones,WHITE_NOTES,BLACK_KEYS,KEY_CODES,SOLFEGE} from './instruments.js';
 const $=selector=>document.querySelector(selector);
 const icon=(name,extra='')=>`<i class="ph ph-${name} ${extra}" aria-hidden="true"></i>`;
 const saved=loadSettings();
 const initialScene=getScene(saved?.sceneId);
-const state={mode:'drums',sceneId:initialScene.id,bar:0,bpm:initialScene.bpm,volume:72,reverb:initialScene.space*100,sensitivity:55,pattern:scenePattern(initialScene),playing:false,recording:false,metronome:false,backing:true,assist:true,mix:{...DEFAULT_MIX},tone:initialScene.voice};
+const state={mode:'synth',experience:'instruments',playHeight:52,fingers:2,octave:0,sceneId:initialScene.id,bar:0,bpm:initialScene.bpm,volume:72,reverb:initialScene.space*100,sensitivity:55,pattern:scenePattern(initialScene),playing:false,recording:false,metronome:false,backing:true,assist:true,mix:{...DEFAULT_MIX},tone:initialScene.voice};
 if(saved){
+  if(Number.isFinite(saved.playHeight))state.playHeight=Math.max(40,Math.min(63,saved.playHeight));
+  if([1,2,4].includes(saved.fingers))state.fingers=saved.fingers;
+  if([-1,0,1].includes(saved.octave))state.octave=saved.octave;
   for(const k of ['volume','sensitivity'])if(Number.isFinite(saved[k]))state[k]=Math.max(0,Math.min(100,saved[k]));
   if(saved.musicVersion===2){
     for(const k of ['bpm','reverb'])if(Number.isFinite(saved[k]))state[k]=Math.max(k==='bpm'?40:0,Math.min(k==='bpm'?220:100,saved[k]));
@@ -26,6 +30,7 @@ if(saved){
   }
 }
 const engine=new AudioEngine(),gestures=new GestureInterpreter();
+const instrument=new InstrumentInterpreter(),heldNotes=new Map(),heldKeys=new Map(),lastDrumHits=new Map();
 const app=$('#app');
 app.innerHTML=`<div class="performance" id="camera-stage">
   <video id="camera-video" muted playsinline aria-hidden="true"></video>
@@ -36,9 +41,19 @@ app.innerHTML=`<div class="performance" id="camera-stage">
     <div class="instrument-tabs" role="tablist" aria-label="Инструмент"><button role="tab" aria-selected="true" class="active" data-mode="drums">${icon('metronome')}<span>Барабаны</span></button><button role="tab" aria-selected="false" data-mode="synth">${icon('piano-keys')}<span>Синтезатор</span></button><button role="tab" aria-selected="false" data-mode="theremin">${icon('wave-sine')}<span>Терменвокс</span></button></div>
     <div class="toolbar-actions"><button class="button record-button" id="record-button"><span class="record-dot"></span><span>Начать запись</span></button><button class="icon-button" id="recordings-nav" aria-label="Мои записи" title="Мои записи">${icon('vinyl-record')}<span id="record-count">0</span></button><button class="icon-button" id="help-button" aria-label="Как играть" title="Как играть">${icon('question')}</button><button class="icon-button" id="settings-button" aria-label="Настройки" title="Настройки">${icon('gear-six')}</button><button class="icon-button" id="theme-button" aria-label="Переключить тему" title="Переключить тему">${icon('sun')}</button><button class="icon-button" id="fullscreen-button" aria-label="Развернуть всю студию" title="Развернуть всю студию">${icon('corners-out')}</button></div>
   </header>
+  <div class="play-mode-switch overlay" role="tablist" aria-label="Способ игры"><button role="tab" aria-selected="true" data-experience="instruments" class="active">${icon('piano-keys')} Инструменты</button><button role="tab" aria-selected="false" data-experience="gestures">${icon('hand-tap')} Жесты</button></div>
   <div class="tracking-banner"><span class="status-dot"></span><span id="camera-badge">КАМЕРА ВЫКЛЮЧЕНА</span><span class="banner-separator">·</span><span id="tracking-status">Пример расположения рук</span></div>
   <div class="camera-start" id="camera-start"><div class="start-icon">${icon('hand-tap')}</div><h1 id="camera-title">Ваши руки — инструмент</h1><p id="camera-description">Коснитесь большим пальцем любого другого.<br>Звук для каждого пальца указан по краям экрана.</p><button class="button mint" id="camera-button">${icon('video-camera')}<span>Включить камеру</span>${icon('arrow-right')}</button><span id="camera-hint">Покажите обе ладони. Видео остаётся на вашем устройстве.</span></div>
   <div class="music-ribbon"><span id="scene-ribbon">${initialScene.name}</span><span>·</span><span id="key-label">${initialScene.key}</span><span class="chord-badge" id="chord-label">${initialScene.chords[0].name}</span><span id="music-bar">1 / 4</span></div>
+  <section class="play-surface" id="play-surface" aria-label="Инструмент поверх видео">
+    <div class="surface-heading"><div><h2 id="surface-title">Воздушные клавиши</h2><p id="surface-description">Опускайте пальцы через линии на клавишах. Поднимите, чтобы отпустить.</p></div><div class="surface-controls"><label title="Сколько пальцев распознавать"><span>Пальцы</span><select id="play-fingers" aria-label="Пальцы для игры"><option value="1">2 указательных</option><option value="2" selected>Указательные + средние</option><option value="4">Все 8 пальцев</option></select></label><label class="height-control"><span>Высота</span><input type="range" id="play-height" aria-label="Высота инструмента" min="40" max="63" value="52"></label><div class="octave-control" id="octave-control"><button id="octave-down" aria-label="На октаву ниже">−</button><span id="octave-label">C4–C5</span><button id="octave-up" aria-label="На октаву выше">+</button></div></div></div>
+    <div class="piano" id="piano" role="group" aria-label="Клавиатура синтезатора">
+      ${WHITE_NOTES.map((midi,i)=>`<button class="piano-key white-key" data-note="${midi}" style="--position:${i}" aria-label="${SOLFEGE[midi%12]}, ${midi===72?'C5':'C4'}"><span class="key-strike" aria-hidden="true"></span><span class="key-label"><strong>${SOLFEGE[midi%12]}</strong><small data-note-name="${midi}"></small><kbd>${['A','S','D','F','J','K','L',';'][i]}</kbd></span></button>`).join('')}
+      ${BLACK_KEYS.map(({midi,after},i)=>`<button class="piano-key black-key" data-note="${midi}" style="--position:${after+.69}" aria-label="${SOLFEGE[midi%12]}"><span class="key-strike" aria-hidden="true"></span><span class="key-label"><strong>${SOLFEGE[midi%12]}</strong><small data-note-name="${midi}"></small><kbd>${['W','E','T','Y','U'][i]}</kbd></span></button>`).join('')}
+    </div>
+    <div class="air-drums" id="air-drums" role="group" aria-label="Воздушные барабаны" hidden>${PADS.map((pad,i)=>`<button class="air-drum" data-air-drum="${i}" aria-label="${pad.name}"><span class="drum-number">${i+1}</span><span class="drum-strike" aria-hidden="true"></span><strong>${pad.name}</strong><kbd>${pad.key}</kbd></button>`).join('')}</div>
+    <div class="surface-legend"><span><b></b> <span id="surface-legend">Подсвеченные ноты сочетаются с текущим аккордом</span></span><span>Можно играть мышью, касанием или клавиатурой</span></div>
+  </section><div id="instrument-cursors" aria-hidden="true"></div>
   <div class="hand-instruments" id="pad-grid">
     ${['Левая','Правая'].map((name,hand)=>`<section class="hand-instrument overlay ${hand?'right-instrument':'left-instrument'}" aria-label="${name} рука, инструменты"><div class="hand-heading"><div><span class="eyebrow">${hand?'ПРАВАЯ':'ЛЕВАЯ'} РУКА</span><h2>Большой палец +</h2></div><span class="hand-status" id="${hand?'right':'left'}-status"><span class="status-dot neutral"></span><span>Не в кадре</span></span></div><div class="finger-pads">${PADS.slice(hand*4,hand*4+4).map((p,finger)=>{const i=hand*4+finger;return `<button class="sound-pad" data-pad="${i}" title="Большой + ${p.finger.split(' · ')[0].toLowerCase()}: ${p.name}" aria-label="${p.name}, клавиша ${p.key}"><span class="finger-number">${finger+1}</span><span class="pad-text"><span class="finger-name">${p.finger.split(' · ')[0]}</span><strong>${p.name}</strong><span class="pad-caption" hidden>${p.en}</span></span><kbd>${p.key}</kbd><span class="pad-hit-dot" aria-hidden="true"></span></button>`}).join('')}</div><div class="hand-caption">Коснитесь → звук · разведите → ещё раз</div></section>`).join('')}
   </div>
@@ -61,7 +76,7 @@ app.innerHTML=`<div class="performance" id="camera-stage">
 `;
 const camera=new HandCamera($('#camera-video'),$('#hand-canvas'),onHands,onCameraStatus);
 engine.setScene(initialScene);engine.volume=state.volume/100;engine.reverb=state.reverb/100;engine.setTempo(state.bpm);engine.tone=state.tone;engine.mix={...state.mix};
-function persist(){saveSettings({musicVersion:2,sceneId:state.sceneId,bpm:state.bpm,volume:state.volume,reverb:state.reverb,sensitivity:state.sensitivity,pattern:state.pattern,mix:state.mix,backing:state.backing,assist:state.assist,tone:state.tone});}
+function persist(){saveSettings({musicVersion:2,sceneId:state.sceneId,bpm:state.bpm,volume:state.volume,reverb:state.reverb,sensitivity:state.sensitivity,pattern:state.pattern,mix:state.mix,backing:state.backing,assist:state.assist,tone:state.tone,playHeight:state.playHeight,fingers:state.fingers,octave:state.octave});}
 let toastTimeout;
 function toast(message){$('#toast').textContent=message;$('#toast').classList.add('visible');clearTimeout(toastTimeout);toastTimeout=setTimeout(()=>$('#toast').classList.remove('visible'),4000);}
 async function ready(){try{await engine.init();return true;}catch{toast('Не удалось включить звук. Попробуйте Chrome или Edge.');return false;}}
@@ -85,17 +100,70 @@ async function trigger(index,mode=state.mode){
   const name=mode==='drums'?PADS[index].name:engine.noteNames(time)[index];
   setTimeout(()=>flash(index,name),Math.max(0,(time-engine.ctx.currentTime)*1000));
 }
+function paintHeldKeys(){
+  document.querySelectorAll('[data-note]').forEach(key=>key.classList.toggle('held',heldKeys.has(`key-${key.dataset.note}`)));
+}
+async function instrumentOn(event){
+  const {id,token,velocity=.7}=event,request={id};
+  instrumentOff(token,true);heldNotes.set(token,request);
+  if(!await ready()){if(heldNotes.get(token)===request)heldNotes.delete(token);return;}
+  if(heldNotes.get(token)!==request)return;
+  request.started=true;
+  if(id.startsWith('drum-')){
+    const index=Number(id.slice(5)),now=engine.ctx.currentTime;
+    if(now-(lastDrumHits.get(index)??-Infinity)>=.045){lastDrumHits.set(index,now);engine.hit(index,'drums',now+.004,velocity);flashAirDrum(index);}
+    if(request.released)instrumentOff(token);return;
+  }
+  let held=heldKeys.get(id);
+  if(!held){held={voice:engine.noteOn(event.midi,velocity),tokens:new Set()};heldKeys.set(id,held);}
+  held.tokens.add(token);paintHeldKeys();
+  $('#last-sound').textContent=engineName(event.midi);$('#last-gesture').textContent='Поднимите палец, чтобы отпустить клавишу';
+  if(request.released)setTimeout(()=>{if(heldNotes.get(token)===request)instrumentOff(token);},80);
+}
+function instrumentOff(token,cancel=false){
+  const request=heldNotes.get(token);if(!request)return;
+  // Keep a quick first tap audible while the browser unlocks its audio context.
+  if(!request.started&&!cancel){request.released=true;return;}
+  heldNotes.delete(token);
+  const held=heldKeys.get(request.id);
+  if(held){held.tokens.delete(token);if(!held.tokens.size){engine.noteOff(held.voice);heldKeys.delete(request.id);}}
+  paintHeldKeys();
+}
+function engineName(midi){return ['C','C♯','D','E♭','E','F','F♯','G','A♭','A','B♭','B'][midi%12]+(Math.floor(midi/12)-1);}
+function resetInstrument(cameraOnly=false){
+  instrument.reset();for(const token of [...heldNotes.keys()])if(!cameraOnly||token.startsWith('cam-'))instrumentOff(token,true);
+  $('#instrument-cursors').replaceChildren();
+}
+function flashAirDrum(index){
+  const button=$(`[data-air-drum="${index}"]`);button.classList.add('struck');clearTimeout(button._timer);button._timer=setTimeout(()=>button.classList.remove('struck'),140);
+  $('#last-sound').textContent=PADS[index].name;$('#last-gesture').textContent='Поднимите руку и ударьте ещё раз';
+}
+function instrumentLayout(){
+  const stage=$('#camera-stage').getBoundingClientRect(),rect=$(state.mode==='drums'?'#air-drums':'#piano').getBoundingClientRect();
+  const bounds={x:(rect.x-stage.x)/stage.width,y:(rect.y-stage.y)/stage.height,width:rect.width/stage.width,height:rect.height/stage.height};
+  return state.mode==='drums'?drumZones(bounds):pianoKeys(bounds,state.octave);
+}
+let lastHandFrame=0;
 function onHands(hands,time){
-  if(document.hidden){gestures.reset();engine.silenceTheremin();return;}
-  if(!hands.length){gestures.reset();engine.silenceTheremin();}
-  const {hits,active}=gestures.update(hands,time,state.sensitivity);
-  camera.activePads=active;
-  document.querySelectorAll('.sound-pad').forEach((p,i)=>p.classList.toggle('pinched',active.has(i)));
+  lastHandFrame=performance.now();
+  if(document.hidden||$('#modal').open||(state.experience==='instruments'&&(!$('#music-panel').hidden||!$('#sequencer-panel').hidden))){gestures.reset();resetInstrument(true);engine.silenceTheremin();return;}
+  if(!hands.length){gestures.reset();resetInstrument(true);engine.silenceTheremin();}
   for(const side of ['Left','Right']){const el=$(side==='Left'?'#left-status':'#right-status'),found=hands.some(h=>h.side===side);el.innerHTML=`<span class="status-dot ${found?'':'neutral'}"></span><span>${found?'В кадре':'Не в кадре'}</span>`;}
   if(camera?.status==='ready')$('#tracking-status').textContent=hands.length?`${hands.length*21} точек · ${hands.length} ${hands.length===1?'рука':'руки'}`:'Покажите ладони';
   if(state.mode==='theremin'){const freq=engine.theremin(hands);$('#theremin-note').textContent=freq?`${engine.lastThereminNote} · ${Math.round(freq)} Hz`:'Покажите руки камере';}
-  else for(const hit of hits)void trigger(hit);
+  else if(state.experience==='instruments'){
+    const result=instrument.update(camera.projectHands(hands),time,instrumentLayout(),{drums:state.mode==='drums',fingers:state.fingers});
+    for(const event of result.off)instrumentOff(`cam-${event.token}`);
+    for(const event of result.on)void instrumentOn({...event,token:`cam-${event.token}`});
+    $('#instrument-cursors').innerHTML=result.cursors.map(p=>`<span class="finger-cursor ${p.active?'pressed':''}" style="left:${p.x*100}%;top:${p.y*100}%"><b>${p.finger+1}</b></span>`).join('');
+  }else{
+    const {hits,active}=gestures.update(hands,time,state.sensitivity);camera.activePads=active;
+    document.querySelectorAll('.sound-pad').forEach((p,i)=>p.classList.toggle('pinched',active.has(i)));
+    for(const hit of hits)void trigger(hit);
+  }
 }
+// Release camera voices even if the inference worker or video stream stops delivering frames.
+setInterval(()=>{if(performance.now()-lastHandFrame>300&&[...heldNotes.keys()].some(t=>t.startsWith('cam-')))resetInstrument(true);},100);
 function onCameraStatus(status,message){
   const loading=status==='requesting'||status==='loading',live=status==='ready';
   $('#camera-badge').textContent=live?'КАМЕРА ВКЛЮЧЕНА':loading?'ПОДКЛЮЧЕНИЕ':'КАМЕРА ВЫКЛЮЧЕНА';
@@ -104,7 +172,7 @@ function onCameraStatus(status,message){
   $('#camera-button').disabled=loading;$('#camera-button span').textContent=status==='requesting'?'Разрешите доступ…':status==='loading'?'Загружаем модель…':status==='error'?'Попробовать снова':'Включить камеру';
   $('#camera-hint').textContent=message|| (status==='loading'?'Первый запуск может занять несколько секунд':'Покажите обе ладони. Видео остаётся на вашем устройстве.');
   $('#camera-hint').classList.toggle('error',status==='error');$('#tracking-status').textContent=loading?'Подключение…':live?'Покажите ладони':'Ожидание камеры';
-  $('#camera-description').textContent='Коснитесь большим пальцем любого другого. Звук для каждого пальца указан по краям экрана.';
+  updatePlayingInstructions();
   if(!live){camera.activePads=new Set();document.querySelectorAll('.sound-pad').forEach(p=>p.classList.remove('pinched'));}
 }
 $('#camera-button').onclick=async()=>{if(await ready())void camera.start();};
@@ -144,18 +212,64 @@ function updateMusicalLabels(){
   $('#chord-label').textContent=chordAt(scene,state.bar).name;$('#music-bar').textContent=`${state.bar+1} / 4`;
   $('#active-instrument').textContent=`${state.mode==='drums'?'Барабаны':state.mode==='synth'?'Синтезатор':'Терменвокс'} · ${scene.key}`;
   document.querySelectorAll('[data-chord]').forEach(c=>c.classList.toggle('active',Number(c.dataset.chord)===state.bar));
+  const recommended=new Set(engine.notes(undefined,15).map(note=>note%12));
+  document.querySelectorAll('[data-note]').forEach(key=>{
+    const midi=Number(key.dataset.note)+state.octave*12,name=engineName(midi);
+    key.querySelector('small').textContent=name;key.classList.toggle('recommended',recommended.has(midi%12));
+    key.setAttribute('aria-label',`${SOLFEGE[midi%12]}, ${name}${recommended.has(midi%12)?', подходит к аккорду':''}`);
+  });
+  $('#octave-label').textContent=`C${4+state.octave}–C${5+state.octave}`;
+  $('#octave-down').disabled=state.octave<=-1;$('#octave-up').disabled=state.octave>=1;
   camera.draw();
 }
+function updatePlayingInstructions(){
+  const direct=state.experience==='instruments',drums=state.mode==='drums',theremin=state.mode==='theremin';
+  $('#camera-title').textContent=theremin?'Мелодия движением рук':direct?(drums?'Барабаны в воздухе':'Играйте на воздушных клавишах'):'Ваши руки — инструмент';
+  $('#camera-description').textContent=theremin?'Правая рука выбирает ноту, левая меняет громкость.':direct?(drums?'Поднимите указательные и средние пальцы над площадками. Опускайте их через линии, как при ударе по барабану.':'Расположите пальцы над клавишами. Опустите через пунктирную линию для звука, поднимите для отпускания.'):'Коснитесь большим пальцем любого другого. Звук для каждого пальца указан по краям экрана.';
+  $('#surface-title').textContent=drums?'Воздушные барабаны':'Воздушные клавиши';
+  $('#surface-description').textContent=drums?'Ударьте вниз через линию. Поднимите пальцы перед следующим ударом.':'Опускайте пальцы через линии на клавишах. Поднимите, чтобы отпустить.';
+  $('#surface-legend').textContent=drums?'Быстрее движение вниз, сильнее удар':'Подсвеченные ноты сочетаются с текущим аккордом';
+}
 function setMode(mode){
+  resetInstrument();
   state.mode=mode;engine.silenceTheremin();gestures.reset();camera.activePads=new Set();
   document.querySelectorAll('[data-mode]').forEach(t=>{t.classList.toggle('active',t.dataset.mode===mode);t.setAttribute('aria-selected',String(t.dataset.mode===mode));});
-  $('#camera-stage').dataset.mode=mode;$('#pad-grid').hidden=mode==='theremin';$('#theremin-info').hidden=mode!=='theremin';$('.preset-row').hidden=mode!=='synth';
+  const direct=state.experience==='instruments';camera.instrumentMode=direct&&mode!=='theremin';
+  $('#camera-stage').dataset.mode=mode;$('#camera-stage').dataset.experience=state.experience;
+  $('#pad-grid').hidden=mode==='theremin'||direct;$('#theremin-info').hidden=mode!=='theremin';$('.preset-row').hidden=mode!=='synth';
+  $('#play-surface').hidden=!direct||mode==='theremin';$('#piano').hidden=mode!=='synth';$('#air-drums').hidden=mode!=='drums';$('#octave-control').hidden=mode!=='synth';
   $('#preset').value=state.tone;document.querySelectorAll('[data-pad]').forEach(p=>p.classList.remove('pinched','hit'));
-  updateMusicalLabels();
+  updatePlayingInstructions();updateMusicalLabels();placeSurface();
   $('#last-sound').textContent=mode==='theremin'?'Мелодия в тональности сцены':mode==='synth'?'Добавьте свою мелодию':'Начните с ритма';
-  $('#last-gesture').textContent=mode==='theremin'?'Правая — высота ноты · левая — громкость':mode==='synth'?'Нажмите «Играть» — бас и аккорды поддержат вас':'Нажмите «Играть» или коснитесь большим пальцем остальных';
+  $('#last-gesture').textContent=mode==='theremin'?'Правая — высота ноты · левая — громкость':direct?'Включите камеру или попробуйте инструмент с клавиатуры':mode==='synth'?'Нажмите «Играть» — бас и аккорды поддержат вас':'Нажмите «Играть» или коснитесь большим пальцем остальных';
 }
+const experienceModes={instruments:'synth',gestures:'drums'};
+document.querySelectorAll('[data-experience]').forEach(tab=>tab.onclick=()=>{
+  experienceModes[state.experience]=state.mode;state.experience=tab.dataset.experience;
+  document.querySelectorAll('[data-experience]').forEach(t=>{const active=t.dataset.experience===state.experience;t.classList.toggle('active',active);t.setAttribute('aria-selected',String(active));});
+  setMode(experienceModes[state.experience]);
+});
 document.querySelectorAll('[data-mode]').forEach(t=>t.onclick=()=>setMode(t.dataset.mode));
+$('#play-height').value=state.playHeight;$('#play-fingers').value=state.fingers;
+function placeSurface(){
+  if($('#play-surface').hidden)return;
+  const stage=$('#camera-stage').getBoundingClientRect(),surface=$('#play-surface').getBoundingClientRect(),dock=$('.performance-dock').getBoundingClientRect();
+  const max=dock.y-stage.y-surface.height-15,min=Math.min(max,stage.height*.40);
+  const y=min+(max-min)*(state.playHeight-40)/23;
+  $('#play-surface').style.top=`${Math.max(190,y)}px`;
+}
+function applyPlayHeight(){resetInstrument();placeSurface();}
+applyPlayHeight();
+new ResizeObserver(()=>{resetInstrument(true);placeSurface();}).observe($('#camera-stage'));
+$('#play-height').oninput=e=>{state.playHeight=Number(e.target.value);applyPlayHeight();persist();};
+$('#play-fingers').onchange=e=>{resetInstrument();state.fingers=Number(e.target.value);persist();};
+function shiftOctave(delta){resetInstrument();state.octave=Math.max(-1,Math.min(1,state.octave+delta));updateMusicalLabels();persist();}
+$('#octave-down').onclick=()=>shiftOctave(-1);$('#octave-up').onclick=()=>shiftOctave(1);
+document.querySelectorAll('[data-note],[data-air-drum]').forEach(button=>{
+  button.addEventListener('pointerdown',e=>{e.preventDefault();button.setPointerCapture(e.pointerId);const midi=Number(button.dataset.note);void instrumentOn({id:button.dataset.note?`key-${midi}`:`drum-${button.dataset.airDrum}`,midi:midi+state.octave*12,token:`pointer-${e.pointerId}`,velocity:.72});});
+  for(const type of ['pointerup','pointercancel','lostpointercapture'])button.addEventListener(type,e=>instrumentOff(`pointer-${e.pointerId}`));
+  button.addEventListener('click',e=>{if(e.detail===0){const midi=Number(button.dataset.note),token=`accessible-${button.dataset.note||button.dataset.airDrum}`;void instrumentOn({id:button.dataset.note?`key-${midi}`:`drum-${button.dataset.airDrum}`,midi:midi+state.octave*12,token});setTimeout(()=>instrumentOff(token),350);}});
+});
 $('#preset').onchange=e=>{state.tone=e.target.value;engine.tone=state.tone;persist();};
 $('#theremin-preview').onclick=async()=>{if(await ready())engine.notes().slice(0,5).forEach((note,i)=>engine.melody(note,'melody',engine.ctx.currentTime+i*.22,.55,'pad','live',.28));};
 function showMusic(open){
@@ -164,7 +278,7 @@ function showMusic(open){
 }
 $('#scene-toggle').onclick=()=>showMusic($('#music-panel').hidden);$('#close-music').onclick=()=>showMusic(false);
 async function selectScene(id){
-  const wasPlaying=state.playing;stopTransport();engine.panic();
+  const wasPlaying=state.playing;resetInstrument();stopTransport();engine.panic();
   const scene=getScene(id);state.sceneId=scene.id;state.bar=0;state.bpm=scene.bpm;state.pattern=scenePattern(scene);state.reverb=scene.space*100;state.tone=scene.voice;
   engine.setScene(scene);$('#bpm').value=state.bpm;$('#preset').value=state.tone;
   $('#chord-progression').innerHTML=scene.chords.map((c,i)=>`<span class="${i===0?'active':''}" data-chord="${i}">${c.name}</span>`).join('');
@@ -231,10 +345,18 @@ $('#record-button').onclick=async()=>{
   }catch(error){setRecordUI(false);toast(error.message||'Не удалось записать аудио.');}finally{btn.disabled=false;}
 };
 let modalURLs=[];
-function openModal(title,content){$('#modal-title').textContent=title;$('#modal-content').innerHTML=content;if(!$('#modal').open)$('#modal').showModal();}
+function openModal(title,content){resetInstrument();engine.silenceTheremin();$('#modal-title').textContent=title;$('#modal-content').innerHTML=content;if(!$('#modal').open)$('#modal').showModal();}
 function closeModal(){$('#modal').close();modalURLs.forEach(URL.revokeObjectURL);modalURLs=[];}
 $('#close-modal').onclick=closeModal;$('#modal').onclick=e=>{if(e.target===$('#modal'))closeModal();};$('#modal').addEventListener('close',()=>{modalURLs.forEach(URL.revokeObjectURL);modalURLs=[];});
-function showGuide(){openModal('Ваш первый звук',`<p class="modal-lead">Разрешите доступ к камере и держите ладони перед собой. Хорошее освещение помогает распознавать пальцы.</p><div class="guide-steps"><div><span>01</span><section><h3>Покажите обе руки</h3><p>Отойдите на 50–100 см от камеры, чтобы обе ладони полностью попадали в кадр.</p></section></div><div><span>02</span><section><h3>Соединяйте кончики пальцев</h3><p>Коснитесь большим пальцем указательного, среднего, безымянного или мизинца. Разведите пальцы перед следующим звуком.</p></section></div><div><span>03</span><section><h3>Соберите свою музыку</h3><p>Выберите сцену внизу экрана и нажмите «Играть»: появятся бас, аккорды и ритм. Переключитесь на синтезатор и добавляйте ноты пальцами. «Начать запись» сохранит звук без доступа к микрофону.</p></section></div></div><div class="gesture-map">${PADS.map(p=>`<div><kbd>${p.key}</kbd><span>${p.finger}</span><strong>${p.name}</strong></div>`).join('')}</div><p class="guide-note">Пробел — играть / пауза. A S D F и J K L ; — звуки. Клавиши работают и в русской раскладке. В режиме «Терменвокс» правая рука выбирает согласованные с аккордом ноты, левая управляет громкостью. «Помощь ритму» слегка выравнивает близкие удары. Громкость ритма, баса, аккордов и мелодии настраивается в панели сцены.</p>`);}
+function showGuide(){
+  if(state.mode==='theremin'){
+    openModal('Играйте на терменвоксе',`<p class="modal-lead">Включите камеру и покажите обе руки. Соединять пальцы не нужно.</p><div class="guide-steps"><div><span>01</span><section><h3>Правая рука выбирает ноту</h3><p>Поднимайте указательный палец правой руки, чтобы повысить ноту, опускайте, чтобы понизить. Ноты согласованы с текущим аккордом сцены.</p></section></div><div><span>02</span><section><h3>Левая рука меняет громкость</h3><p>Поднимайте левую ладонь для более громкого звука. Опускайте её для более тихого. Уберите правую руку из кадра, чтобы остановить звук.</p></section></div></div><p class="guide-note">Аккомпанемент включается кнопкой «Играть». Он необязателен. «Послушать» показывает короткий пример без камеры. Музыку можно записать кнопкой вверху.</p>`);return;
+  }
+  if(state.experience==='instruments'&&state.mode!=='theremin'){
+    openModal('Играйте движением пальцев',`<p class="modal-lead">Клавиши и барабаны находятся прямо в видео. Соединять пальцы не нужно.</p><div class="guide-steps"><div><span>01</span><section><h3>Настройте положение</h3><p>Включите камеру, покажите руки целиком. Ползунком «Высота» расположите инструмент под кончиками пальцев. Камера зеркальная: рука движется туда же, куда вы её ведёте.</p></section></div><div><span>02</span><section><h3>Опускайте и поднимайте пальцы</h3><p>Сначала поднимите кончики выше пунктирных линий. Затем опустите нужный палец через линию. Синтезатор звучит до поднятия пальца; барабан срабатывает один раз на удар. После удара поднимите палец для следующего.</p></section></div><div><span>03</span><section><h3>Играйте двумя руками</h3><p>По умолчанию работают указательные и средние пальцы. Для начала выберите «2 указательных», для аккордов «Все 8 пальцев». Более быстрое движение даёт более сильную атаку. Подсвеченные ноты подходят к аккорду сцены, остальные тоже можно играть.</p></section></div></div><p class="guide-note">Белые клавиши: A S D F J K L ;. Чёрные: W E T Y U. Удерживайте клавишу для длинной ноты. Работают мышь и сенсорный экран. Пробел включает аккомпанемент; для самостоятельной игры он не нужен. Смена октавы: кнопки − / +. Прежний режим со щипками сохранён во вкладке «Жесты». Для камеры важно именно видимое движение вниз по экрану: глубину нажатия на стол обычная веб-камера точно не измеряет.</p>`);return;
+  }
+  openModal('Ваш первый звук',`<p class="modal-lead">Разрешите доступ к камере и держите ладони перед собой. Хорошее освещение помогает распознавать пальцы.</p><div class="guide-steps"><div><span>01</span><section><h3>Покажите обе руки</h3><p>Отойдите на 50–100 см от камеры, чтобы обе ладони полностью попадали в кадр.</p></section></div><div><span>02</span><section><h3>Соединяйте кончики пальцев</h3><p>Коснитесь большим пальцем указательного, среднего, безымянного или мизинца. Разведите пальцы перед следующим звуком.</p></section></div><div><span>03</span><section><h3>Соберите свою музыку</h3><p>Выберите сцену внизу экрана и нажмите «Играть»: появятся бас, аккорды и ритм. Переключитесь на синтезатор и добавляйте ноты пальцами. «Начать запись» сохранит звук без доступа к микрофону.</p></section></div></div><div class="gesture-map">${PADS.map(p=>`<div><kbd>${p.key}</kbd><span>${p.finger}</span><strong>${p.name}</strong></div>`).join('')}</div><p class="guide-note">Пробел — играть / пауза. A S D F и J K L ; — звуки. Клавиши работают и в русской раскладке. В режиме «Терменвокс» правая рука выбирает согласованные с аккордом ноты, левая управляет громкостью. «Помощь ритму» слегка выравнивает близкие удары.</p>`);
+}
 $('#help-button').onclick=showGuide;
 async function updateRecordCount(){try{$('#record-count').textContent=(await recordings('list')).length;}catch{}}
 async function showRecordings(fallback){
@@ -261,9 +383,19 @@ const preferredTheme=storedTheme||(matchMedia('(prefers-color-scheme: dark)').ma
 function themeIcon(){$('#theme-button').innerHTML=icon(document.documentElement.dataset.theme==='dark'?'sun':'moon');}themeIcon();
 $('#theme-button').onclick=()=>{document.documentElement.dataset.theme=document.documentElement.dataset.theme==='dark'?'light':'dark';try{localStorage.setItem('handroom-theme',document.documentElement.dataset.theme);}catch{}themeIcon();};
 const keyMap={KeyA:0,KeyS:1,KeyD:2,KeyF:3,KeyJ:4,KeyK:5,KeyL:6,Semicolon:7};
-document.addEventListener('keydown',e=>{if($('#modal').open||['INPUT','SELECT','TEXTAREA'].includes(document.activeElement?.tagName)||e.metaKey||e.ctrlKey||e.altKey||e.repeat)return;if(e.code==='Space'&&document.activeElement?.tagName!=='BUTTON'){e.preventDefault();void togglePlay();}if(keyMap[e.code]!==undefined){e.preventDefault();void trigger(keyMap[e.code]);}});
+document.addEventListener('keydown',e=>{
+  if($('#modal').open||['INPUT','SELECT','TEXTAREA'].includes(document.activeElement?.tagName)||e.metaKey||e.ctrlKey||e.altKey||e.repeat)return;
+  if(e.code==='Space'&&document.activeElement?.tagName!=='BUTTON'){e.preventDefault();void togglePlay();}
+  if(state.experience==='instruments'&&state.mode!=='theremin'){
+    if(state.mode==='synth'&&KEY_CODES[e.code]!==undefined){e.preventDefault();const midi=KEY_CODES[e.code];void instrumentOn({id:`key-${midi}`,midi:midi+state.octave*12,token:`keyboard-${e.code}`});}
+    if(state.mode==='drums'&&keyMap[e.code]!==undefined){e.preventDefault();void instrumentOn({id:`drum-${keyMap[e.code]}`,token:`keyboard-${e.code}`});}
+  }else if(keyMap[e.code]!==undefined){e.preventDefault();void trigger(keyMap[e.code]);}
+});
+document.addEventListener('keyup',e=>instrumentOff(`keyboard-${e.code}`));
+window.addEventListener('blur',()=>{resetInstrument();engine.silenceTheremin();});
+window.addEventListener('resize',()=>resetInstrument());
 // Pause the transport in background tabs so audio scheduling cannot accumulate stale notes.
-document.addEventListener('visibilitychange',()=>{if(document.hidden){stopTransport();engine.silenceTheremin();}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){resetInstrument();gestures.reset();stopTransport();engine.silenceTheremin();}});
 window.addEventListener('pagehide',()=>{camera.stop();stopTransport();});
 let lastWave=0;const waveCtx=$('#waveform').getContext('2d'),waveData=new Uint8Array(128);
-function drawOutput(time){if(time-lastWave>60){lastWave=time;const w=200,h=32;waveCtx.clearRect(0,0,w,h);if(engine.analyser)engine.analyser.getByteTimeDomainData(waveData);waveCtx.beginPath();for(let i=0;i<100;i++){const value=engine.analyser?(waveData[i]-128)/128:0;const y=h/2+value*35;if(i===0)waveCtx.moveTo(i*2,y);else waveCtx.lineTo(i*2,y);}waveCtx.strokeStyle=document.documentElement.dataset.theme==='light'?'#337855':'#99cfaf';waveCtx.lineWidth=1.5;waveCtx.stroke();}requestAnimationFrame(drawOutput);}requestAnimationFrame(drawOutput);setMode('drums');void updateRecordCount();
+function drawOutput(time){if(time-lastWave>60){lastWave=time;const w=200,h=32;waveCtx.clearRect(0,0,w,h);if(engine.analyser)engine.analyser.getByteTimeDomainData(waveData);waveCtx.beginPath();for(let i=0;i<100;i++){const value=engine.analyser?(waveData[i]-128)/128:0;const y=h/2+value*35;if(i===0)waveCtx.moveTo(i*2,y);else waveCtx.lineTo(i*2,y);}waveCtx.strokeStyle=document.documentElement.dataset.theme==='light'?'#337855':'#99cfaf';waveCtx.lineWidth=1.5;waveCtx.stroke();}requestAnimationFrame(drawOutput);}requestAnimationFrame(drawOutput);setMode('synth');void updateRecordCount();

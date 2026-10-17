@@ -152,6 +152,21 @@ export class AudioEngine {
     // Oscillator partial gains are disconnected with the voice as well.
     return this.track(sources,env,nodes,time,time+duration+release+.02,tag);
   }
+  noteOn(midi,velocity=.7){
+    if(!this.built)return null;
+    const c=this.ctx,time=c.currentTime+.004,f=midiHz(midi),sources=[],nodes=[],env=c.createGain(),filter=c.createBiquadFilter();
+    const pad=this.tone==='pad',mallet=this.tone==='mallet',level=(pad?.15:mallet?.22:.18)*Math.max(.15,Math.min(1,velocity));
+    env.gain.setValueAtTime(.00001,time);env.gain.linearRampToValueAtTime(level,time+(pad?.12:.008));
+    env.gain.exponentialRampToValueAtTime(level*(mallet?.10:.58),time+(mallet?.65:.4));
+    filter.type='lowpass';filter.Q.value=.45;filter.frequency.setValueAtTime(pad?1900:mallet?5000:3800,time);
+    filter.frequency.exponentialRampToValueAtTime(pad?1400:1800,time+.7);
+    const partials=mallet?[[1,1],[2,.22],[3.98,.065]]:pad?[[1,.65],[1.003,.35],[2,.13]]:[[1,1],[2,.26],[3,.075]];
+    for(const [ratio,weight]of partials){const osc=c.createOscillator(),gain=c.createGain();osc.type='sine';osc.frequency.value=f*ratio;gain.gain.value=weight;osc.connect(gain);gain.connect(filter);sources.push(osc);nodes.push(gain);}
+    filter.connect(env);nodes.push(filter,...this.route(env,'melody',pad?.65:.28,.16));
+    // Safety timeout is also used if a device disconnects before note-off arrives.
+    return this.track(sources,env,nodes,time,time+120,'instrument');
+  }
+  noteOff(voice){if(voice&&this.built)this.releaseVoice(voice,this.ctx.currentTime,this.tone==='pad'?.28:.10);}
   bass(midi,time,duration,velocity=.65){
     const c=this.ctx,osc=c.createOscillator(),sub=c.createOscillator(),subGain=c.createGain(),filter=c.createBiquadFilter();
     const env=this.envelope(time,duration,.32*velocity,.015,.08);

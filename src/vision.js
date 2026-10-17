@@ -54,6 +54,20 @@ export class HandCamera {
     }
     this.raf=requestAnimationFrame(()=>this.loop(token));
   }
+  frameView(w=this.canvas.width,h=this.canvas.height){
+    const vw=this.video.videoWidth,vh=this.video.videoHeight;
+    if(this.status!=='ready'||!vw)return {x:0,y:0,width:w,height:h};
+    const narrow=this.canvas.getBoundingClientRect().width<=650,mobile=narrow&&!this.instrumentMode;
+    const area=mobile?{x:0,y:h*.21,width:w,height:h*.25}:{x:0,y:0,width:w,height:h};
+    // A portrait direct-instrument view must fill the height: letterboxing would put
+    // the strike lines outside the camera image and make the lower keys unreachable.
+    const scale=this.instrumentMode&&narrow?Math.max(area.width/vw,area.height/vh):Math.min(area.width/vw,area.height/vh);
+    return {x:area.x+(area.width-vw*scale)/2,y:area.y+(area.height-vh*scale)/2,width:vw*scale,height:vh*scale};
+  }
+  projectHands(hands){
+    const w=this.canvas.width,h=this.canvas.height,view=this.frameView(w,h);
+    return hands.map(hand=>({...hand,points:hand.points.map(p=>({...p,x:(view.x+(1-p.x)*view.width)/w,y:(view.y+p.y*view.height)/h}))}));
+  }
   draw(){
     const c=this.canvas,ctx=c.getContext('2d'),w=c.width,h=c.height;
     if(!w||!h)return;
@@ -63,9 +77,7 @@ export class HandCamera {
     const mobileView=c.getBoundingClientRect().width<=650;
     if(live&&this.video.videoWidth){
       const vw=this.video.videoWidth,vh=this.video.videoHeight;
-      const area=mobileView?{x:0,y:h*.21,width:w,height:h*.25}:{x:0,y:0,width:w,height:h};
-      const scale=Math.min(area.width/vw,area.height/vh);
-      view={x:area.x+(area.width-vw*scale)/2,y:area.y+(area.height-vh*scale)/2,width:vw*scale,height:vh*scale};
+      view=this.frameView(w,h);
       if(this.showVideo){
         // Keep the complete camera frame visible. A soft video backdrop fills any unused edges.
         const cover=Math.max(w/vw,h/vh),bw=vw*cover,bh=vh*cover;
@@ -95,7 +107,7 @@ export class HandCamera {
       ctx.globalAlpha=1;
       // Number the same four fingers as the persistent instrument panels.
       const dpr=Math.min(devicePixelRatio,2),radius=(mobile?9:12)*dpr;
-      if(!this.theremin) TIPS.forEach((tip,finger)=>{
+      if(!this.theremin&&!this.instrumentMode) TIPS.forEach((tip,finger)=>{
         const p=points[tip],index=(hand.side==='Left'?0:4)+finger,active=this.activePads.has(index);
         const y=p.y-radius*1.7;
         ctx.beginPath();ctx.arc(p.x,y,radius,0,Math.PI*2);ctx.fillStyle=active?'#b7e8cd':'#11241de8';ctx.fill();

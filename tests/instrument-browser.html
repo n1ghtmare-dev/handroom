@@ -1,0 +1,25 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Handroom direct-instrument QA</title></head><body><div id="app"></div>
+<div id="qa" style="position:fixed;bottom:0;left:0;z-index:99999;background:#fff;color:#111;font:12px sans-serif;padding:4px;display:flex;gap:8px"><button id="qa-up">Поднять пальцы</button><button id="qa-down">Нажать До</button><button id="qa-chord">До + Ми</button><button id="qa-lost">Потерять руки</button><button id="qa-stall">Остановить кадры</button><output id="qa-audio">Audio: 0</output></div>
+<script type="module">
+// Feed a deterministic camera + inference stream through the production event path.
+// No hardware permissions or production-only test API are used.
+const video=document.createElement('canvas');video.width=1280;video.height=720;const drawing=video.getContext('2d');drawing.fillStyle='#263d31';drawing.fillRect(0,0,1280,720);
+navigator.mediaDevices.getUserMedia=async()=>{const stream=video.captureStream(24);const timer=setInterval(()=>{drawing.fillRect(0,0,1280,720)},40);stream.getTracks()[0].addEventListener('ended',()=>clearInterval(timer));return stream;};
+let pose='up',stall=false;
+function points(x,y){return Array.from({length:21},(_,i)=>({x:x+(i===0?.04:0),y:y+(i===0?.25:0),z:0}));}
+function fakeHands(){
+ if(pose==='lost')return [];
+ const stage=document.querySelector('#camera-stage').getBoundingClientRect(),isDrum=document.querySelector('#camera-stage').dataset.mode==='drums';
+ const surface=document.querySelector(isDrum?'#air-drums':'#piano').getBoundingClientRect(),width=surface.width/8;
+ const scale=Math.min(stage.width/1280,stage.height/720),vw=1280*scale,vh=720*scale,vx=(stage.width-vw)/2,vy=(stage.height-vh)/2;
+ function h(index,side,down){const sx=surface.x-stage.x+width*(index+.5),line=surface.y-stage.y+surface.height*(isDrum?.48:.70),sy=line+(down?18:-48);return {side,points:points(1-(sx-vx)/vw,(sy-vy)/vh)};}
+ return [h(0,'Left',pose==='down'||pose==='chord'),h(2,'Right',pose==='chord')];
+}
+window.Worker=class{postMessage(data){if(data.type==='init')setTimeout(()=>this.onmessage?.({data:{type:'ready'}}),5);if(data.type==='frame'){data.frame.close();if(!stall)setTimeout(()=>this.onmessage?.({data:{type:'result',hands:fakeHands(),time:data.time}}),5);}}terminate(){}};
+let audioPeak=0;
+const Original=window.AudioContext;
+window.AudioContext=class extends Original{createAnalyser(){const node=super.createAnalyser(),original=node.getByteTimeDomainData.bind(node);node.getByteTimeDomainData=a=>{original(a);audioPeak=Math.max(...a.map(x=>Math.abs(x-128)));document.querySelector('#qa-audio').textContent=`Audio: ${audioPeak}`;};return node;}};
+await import('/src/main.js');
+for(const [id,value]of Object.entries({'qa-up':'up','qa-down':'down','qa-chord':'chord','qa-lost':'lost'}))document.getElementById(id).onclick=()=>{pose=value;};
+document.querySelector('#qa-stall').onclick=()=>{stall=true;};
+</script></body></html>
