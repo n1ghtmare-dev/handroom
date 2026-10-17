@@ -1,0 +1,29 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Handroom browser integration checks</title></head><body style="font:16px system-ui;background:#172019;color:#d7e7dc;padding:30px"><h1>Handroom integration checks</h1><button id="run">Run synthetic camera and audio checks</button><pre id="results" style="white-space:pre-wrap">Ready. This check uses Google's hand fixture on a synthetic video stream, never the device camera.</pre><video id="video" muted playsinline style="position:absolute;width:1px;height:1px;opacity:0"></video><canvas id="canvas" width="640" height="480" style="width:320px;height:240px"></canvas><script type="module">
+import {HandCamera} from '/src/vision.js';
+import {AudioEngine} from '/src/audio.js';
+import {encodeWav} from '/src/gestures.js';
+const result=document.querySelector('#results');
+const log=text=>{result.textContent+='\n'+text;};
+window.onerror=(m)=>log('ERROR: '+m);
+document.querySelector('#run').onclick=async()=>{
+ document.querySelector('#run').disabled=true;
+ const fake=document.createElement('canvas');fake.width=640;fake.height=480;
+ const ctx=fake.getContext('2d');const fixture=new Image();fixture.src='/tests/hands.jpg';await fixture.decode();fake.width=fixture.naturalWidth;fake.height=fixture.naturalHeight;ctx.drawImage(fixture,0,0);
+ const original=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+ navigator.mediaDevices.getUserMedia=async()=>fake.captureStream(10);
+ let completed=false;
+ const camera=new HandCamera(document.querySelector('#video'),document.querySelector('#canvas'),(hands)=>{if(camera.status!=='ready'||completed)return;completed=true;log('RESULT: '+hands.length+' hands; landmarks '+hands.map(h=>h.points.length).join(', '));log(hands.length===2&&hands.every(h=>h.points.length===21)?'VISION PASS':'VISION FAIL');queueMicrotask(()=>camera.stop());navigator.mediaDevices.getUserMedia=original;},(status,message)=>log('CAMERA: '+status+' '+message));
+ try{await camera.start();}catch(e){log('ERROR: '+e.message);}
+ try{
+ const audio=new AudioEngine();await audio.init();await audio.startRecording();
+ for(let i=0;i<8;i++)audio.hit(i,'drums',audio.ctx.currentTime+i*.12);
+ await new Promise(r=>setTimeout(r,1800));const blob=await audio.stopRecording();
+ log('AUDIO BLOB: '+blob.size+' bytes, '+blob.type);const buffer=await audio.ctx.decodeAudioData(await blob.arrayBuffer());
+ const data=buffer.getChannelData(0);const rms=Math.sqrt(data.reduce((sum,v)=>sum+v*v,0)/data.length);
+ const wav=encodeWav([data],buffer.sampleRate);
+ log('AUDIO: recorded '+blob.size+' bytes; decoded '+buffer.duration.toFixed(2)+'s; RMS '+rms.toFixed(3)+'; WAV '+wav.byteLength+' bytes');
+ if(rms<.001)throw new Error('Audio was silent');
+ log('AUDIO PASS');
+ }catch(e){log('AUDIO ERROR: '+e.message);}
+};
+</script></body></html>

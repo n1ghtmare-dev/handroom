@@ -1,0 +1,10 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {GestureInterpreter,pinchRatio,defaultPattern,encodeWav} from '../src/gestures.js';
+function hand(side='Left',pinch=false,scale=1){const points=Array.from({length:21},()=>({x:0,y:0,z:0}));points[0]={x:0,y:1*scale};points[9]={x:0,y:0};points[4]={x:1*scale,y:0};for(const i of [8,12,16,20])points[i]={x:3*scale,y:0};if(pinch)points[8]={x:1.1*scale,y:0};return {side,points};}
+test('pinches are scale invariant',()=>{assert.ok(Math.abs(pinchRatio(hand('Left',true,1).points,8)-pinchRatio(hand('Left',true,.3).points,8))<.00001);});
+test('pinches trigger once, release rearms and hands map to separate pads',()=>{const g=new GestureInterpreter();assert.deepEqual(g.update([hand('Left',true)],0).hits,[0]);assert.deepEqual(g.update([hand('Left',true)],200).hits,[]);g.update([hand()],300);assert.deepEqual(g.update([hand('Left',true),hand('Right',true)],500).hits,[0,4]);});
+test('missing hands release stale pinches',()=>{const g=new GestureInterpreter();g.update([hand('Left',true)],0);g.update([],200);assert.deepEqual(g.update([hand('Left',true)],400).hits,[0]);});
+test('hysteresis avoids retriggering noisy distances',()=>{const g=new GestureInterpreter();const h=hand('Left',true);g.update([h],0);h.points[8].x=1.5;assert.deepEqual(g.update([h],300).hits,[]);assert.ok(g.update([h],500).active.has(0));h.points[8].x=1.1;assert.deepEqual(g.update([h],700).hits,[]);});
+test('default pattern has 4 independent 16-step tracks',()=>{const p=defaultPattern();assert.equal(p.length,4);assert.ok(p.every(r=>r.length===16));p[0][0]=false;assert.equal(defaultPattern()[0][0],true);});
+test('WAV interleaves PCM channels, has valid RIFF sizes, and clips samples',()=>{const b=encodeWav([new Float32Array([0,2]),new Float32Array([-1,.5])],48000);const v=new DataView(b);assert.equal(b.byteLength,52);assert.equal(v.getUint32(4,true),44);assert.equal(v.getUint16(22,true),2);assert.equal(v.getUint32(24,true),48000);assert.equal(v.getInt16(46,true),-32768);assert.equal(v.getInt16(48,true),32767);});

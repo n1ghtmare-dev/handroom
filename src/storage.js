@@ -1,0 +1,5 @@
+let database;
+async function db(){if(database)return database;database=await new Promise((resolve,reject)=>{const r=indexedDB.open('handroom',1);r.onupgradeneeded=()=>r.result.createObjectStore('recordings',{keyPath:'id'});r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});return database;}
+export async function recordings(action,value){const d=await db();return new Promise((resolve,reject)=>{const tx=d.transaction('recordings',action==='list'?'readonly':'readwrite');const store=tx.objectStore('recordings');const req=action==='list'?store.getAll():action==='save'?store.put(value):store.delete(value);let result;req.onsuccess=()=>{result=req.result;};tx.oncomplete=()=>resolve(result);tx.onerror=()=>reject(tx.error);});}
+export function saveSettings(value){try{localStorage.setItem('handroom-session',JSON.stringify(value));return true;}catch{return false;}}
+export function loadSettings(){try{return JSON.parse(localStorage.getItem('handroom-session')||'null');}catch{return null;}}
