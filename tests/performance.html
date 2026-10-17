@@ -1,0 +1,9 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Handroom — synthetic performance QA</title></head><body><div id="app"></div><script type="module">
+// Local QA fixture: exercise the real studio with a synthetic video source.
+// No hardware camera or microphone access is requested.
+const image=new Image();image.src='/tests/hands.jpg';await image.decode();
+const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;
+const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);
+navigator.mediaDevices.getUserMedia=async()=>{const stream=canvas.captureStream(15);const timer=setInterval(()=>ctx.drawImage(image,0,0),67);stream.getVideoTracks()[0].addEventListener('ended',()=>clearInterval(timer));return stream;};
+await import('/src/main.js');
+</script></body></html>
